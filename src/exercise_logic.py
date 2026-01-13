@@ -1,0 +1,1 @@
+# Logika OHP (liczenie powtórzeń, błędy)

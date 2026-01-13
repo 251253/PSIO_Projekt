@@ -1,0 +1,1 @@
+# Główny plik uruchamiający system
