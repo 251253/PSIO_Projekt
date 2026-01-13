@@ -1,0 +1,1 @@
+# Obsługa IP Webcam i kamery laptopa
