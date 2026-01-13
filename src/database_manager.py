@@ -1,0 +1,1 @@
+# Obsługa bazy SQL (zapisywanie sesji)

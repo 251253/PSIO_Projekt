@@ -1,0 +1,19 @@
+# Przetwarzanie obrazu i wideo
+opencv-python==4.10.0.84
+
+# Detekcja postawy (szkieletu)
+mediapipe==0.10.14
+
+# Detekcja obiektów (sztangi)
+ultralytics==8.3.0
+roboflow
+
+# Obliczenia matematyczne (niskopoziomowe funkcje)
+numpy==1.26.4
+
+# Interfejs użytkownika i wizualizacja wyników
+pygame==2.6.0
+matplotlib
+
+# Opcjonalne (jeśli będziecie używać zewnętrznej bazy SQL zamiast wbudowanego sqlite3)
+# psycopg2-binary
