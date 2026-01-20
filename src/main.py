@@ -2,12 +2,12 @@
 import cv2
 import sys
 from camera_handler import CameraHandler
-
+from person_detector import YOLOPersonDetector
 
 def main():
     # KONFIGURACJA
     # Adres IP z kamery telefonu
-    IP_WEBCAM_URL = "https://192.168.55.102:8080/video"
+    IP_WEBCAM_URL = "https://192.168.1.101:8080/video"
 
     # Inicjalizacja handlera kamer
     try:
@@ -15,6 +15,13 @@ def main():
     except Exception as e:
         print(f"Błąd inicjalizacji kamer: {e}")
         return
+
+    # Inicjalizacja detektora YOLO (rozpoznawanie ludzi)
+    detector = YOLOPersonDetector(
+        model_name="yolov8n.pt",
+        conf=0.35,
+        iou=0.45
+    )
 
     print("System gotowy. Wciśnij 'q', aby zakończyć.")
 
@@ -24,14 +31,22 @@ def main():
         frame_laptop = frames.get('laptop')
         frame_ip = frames.get('ip_cam')
 
-        # 2. Wyświetl obraz z laptopa
+        # 2. Kamera laptopa – detekcja człowieka + wyświetlenie
         if frame_laptop is not None:
-            cv2.imshow('Kamera Laptopa (Front)', frame_laptop)
+            vis_laptop, _ = detector.detect_and_draw(
+                frame_laptop,
+                window_label="Person"
+            )
+            cv2.imshow('Kamera Laptopa (Front)', vis_laptop)
 
-        # 3. Wyświetl obraz z telefonu (profil boczny)
+        # 3. Kamera telefonu – detekcja człowieka i wyświetlenie
         if frame_ip is not None:
             frame_ip_resized = cv2.resize(frame_ip, (640, 480))
-            cv2.imshow('Kamera IP (Boczna)', frame_ip_resized)
+            vis_ip, _ = detector.detect_and_draw(
+                frame_ip_resized,
+                window_label="Person"
+            )
+            cv2.imshow('Kamera IP (Boczna)', vis_ip)
         else:
             # Informacja, jeśli IP Webcam nie odpowiada
             pass
