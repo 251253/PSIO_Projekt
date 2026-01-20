@@ -22,9 +22,7 @@ class PoseAnalyzer:
     def find_pose(self, frame):
         """
         Wykrywa pozę i zwraca obiekt z wynikami (landmarks).
-        Nie rysuje nic na oryginalnym obrazie (chyba że wywołasz draw=True w innej funkcji).
         """
-        # MediaPipe wymaga formatu RGB, OpenCV używa BGR
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         # Procesowanie obrazu
@@ -34,8 +32,8 @@ class PoseAnalyzer:
 
     def draw_styled_landmarks(self, frame, results):
         """
-        Rysuje TYLKO kluczowe stawy (barki, łokcie, nadgarstki, biodra).
-        Ignoruje twarz i palce.
+        Rysuje szkielet: Tułów + Ręce + NOGI (Kolana i Kostki).
+        Ignoruje tylko twarz i stopy (palce).
         """
         if not results.pose_landmarks:
             return frame
@@ -43,45 +41,51 @@ class PoseAnalyzer:
         h, w, c = frame.shape
         landmarks = results.pose_landmarks.landmark
 
-        # Lista połączeń, które chcemy rysować (kości)
-        # Numery wg mapy MediaPipe:
-        # 11-12: Barki, 11-13: Lewe ramię, 13-15: Lewe przedramię
-        # 12-14: Prawe ramię, 14-16: Prawe przedramię
-        # 11-23: Lewy bok, 12-24: Prawy bok, 23-24: Biodra
+        # Lista połączeń (Kości)
         connections = [
-            (11, 12), (11, 13), (13, 15),
-            (12, 14), (14, 16),
-            (11, 23), (12, 24), (23, 24)
+            # GÓRA CIAŁA
+            (11, 12), (11, 13), (13, 15),  # Barki i Lewa ręka
+            (12, 14), (14, 16),  # Prawa ręka
+            (11, 23), (12, 24), (23, 24),  # Tułów i Biodra
+
+            # NOGI
+            (23, 25), (25, 27),  # Lewa noga (Biodro -> Kolano -> Kostka)
+            (24, 26), (26, 28)  # Prawa noga (Biodro -> Kolano -> Kostka)
         ]
 
-        # Lista punktów do narysowania (stawy)
-        # 11,12=Barki, 13,14=Łokcie, 15,16=Nadgarstki, 23,24=Biodra
-        indices_to_draw = [11, 12, 13, 14, 15, 16, 23, 24]
+        # Lista punktów (Stawy)
+        indices_to_draw = [
+            11, 12, 13, 14, 15, 16,  # Ręce
+            23, 24,  # Biodra
+            25, 26,  # Kolana (Nowe)
+            27, 28  # Kostki (Nowe)
+        ]
 
-        # 1. Rysowanie Linii (Kości)
+        # 1. Rysowanie Linii
         for start_idx, end_idx in connections:
             start = landmarks[start_idx]
             end = landmarks[end_idx]
 
-            # Rysujemy tylko, jeśli AI jest pewne obu punktów (visibility > 0.5)
-            if start.visibility > 0.5 and end.visibility > 0.5:
+            # Rysujemy tylko, jeśli AI widzi oba punkty
+            if start.visibility > 0.6 and end.visibility > 0.6:
                 cv2.line(
                     frame,
                     (int(start.x * w), int(start.y * h)),
                     (int(end.x * w), int(end.y * h)),
-                    (80, 255, 121),  # Kolor: Jasnozielony
-                    3  # Grubość linii
+                    (80, 255, 121),  # Jasnozielony
+                    3
                 )
 
-        # 2. Rysowanie Kropek (Stawy)
+        # 2. Rysowanie Kropek
         for idx in indices_to_draw:
             lm = landmarks[idx]
-            if lm.visibility > 0.5:
+            if lm.visibility > 0.6:
                 cx, cy = int(lm.x * w), int(lm.y * h)
 
-                # Główna kropka
-                cv2.circle(frame, (cx, cy), 6, (80, 22, 10), -1)
-                # Obwódka
-                cv2.circle(frame, (cx, cy), 8, (80, 255, 121), 2)
+                # Kolana i kostki rysujemy nieco mniejsze
+                radius = 6 if idx < 25 else 4
+
+                cv2.circle(frame, (cx, cy), radius, (80, 22, 10), -1)
+                cv2.circle(frame, (cx, cy), radius + 2, (80, 255, 121), 2)
 
         return frame
