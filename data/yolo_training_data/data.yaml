@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['broom-handle']
+
+roboflow:
+  workspace: moja-b2dkt
+  project: psio-yrgof
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/moja-b2dkt/psio-yrgof/dataset/1
