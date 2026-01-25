@@ -1,93 +1,86 @@
 import cv2
-import sys
+import time
+import numpy as np
 from camera_handler import CameraHandler
 from pose_analysis import PoseAnalyzer
 from exercise_logic import ExerciseLogic
-
-
-def draw_hud(frame, reps, stage, feedback):
-    """Rysuje licznik i komunikaty"""
-    color = (0, 0, 255) if feedback else (245, 117, 16)
-    cv2.rectangle(frame, (0, 0), (300, 100), color, -1)
-
-    cv2.putText(frame, 'REPS', (15, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-    cv2.putText(frame, str(reps), (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2, cv2.LINE_AA)
-
-    cv2.putText(frame, 'STAGE', (100, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-    cv2.putText(frame, stage, (95, 60), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2, cv2.LINE_AA)
-
-    if feedback:
-        h, w = frame.shape[:2]
-        cv2.rectangle(frame, (0, h - 60), (w, h), (0, 0, 255), -1)
-        cv2.putText(frame, feedback, (20, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+from ui_display import UIDisplay
 
 
 def main():
-    IP_WEBCAM_URL = "http://192.168.55.102:8080/video"
-
-    try:
-        cam_handler = CameraHandler(ip_url=IP_WEBCAM_URL)
-    except Exception as e:
-        print(f"Błąd inicjalizacji kamer: {e}")
-        return
-
+    IP_WEBCAM_URL = "http://192.168.18.32:8080/video"
+    cam_handler = CameraHandler(ip_url=IP_WEBCAM_URL)
     detector_front = PoseAnalyzer()
     detector_side = PoseAnalyzer()
     ohp_logic = ExerciseLogic()
+    ui = UIDisplay()
 
-    print("System gotowy. Start treningu.")
+    state = "MENU"
+    countdown_start = 0
+    cur_reps, cur_stage, avg_angle = 0, "START", 90
+
+    win_name = "CyberTrener OHP"
+    cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.setMouseCallback(win_name, lambda e, x, y, f, p: setattr(ui, 'm_event', (e, x, y)))
 
     while True:
         frames = cam_handler.get_frames()
-        frame_laptop = frames.get('laptop')
-        frame_ip = frames.get('ip_cam')
+        f_laptop = frames.get('laptop')
+        f_ip = frames.get('ip_cam')
 
-        # --- WIDOK Z PRZODU ---
-        if frame_laptop is not None:
-            results_front = detector_front.find_pose(frame_laptop)
-            frame_laptop = detector_front.draw_styled_landmarks(frame_laptop, results_front)
+        if f_laptop is None and f_ip is None:
+            if cv2.waitKey(1) & 0xFF == ord('q'): break
+            continue
 
-            if results_front.pose_landmarks:
-                landmarks = results_front.pose_landmarks.landmark
-                reps, stage, _, _ = ohp_logic.process_front_view(landmarks)
-                draw_hud(frame_laptop, reps, stage, ohp_logic.feedback_front)
+        f_laptop = f_laptop if f_laptop is not None else np.zeros((480, 640, 3), dtype=np.uint8)
+        f_ip = cv2.rotate(f_ip, cv2.ROTATE_90_CLOCKWISE) if f_ip is not None else np.zeros((640, 480, 3),
+                                                                                           dtype=np.uint8)
 
-            cv2.imshow('Kamera Laptopa (Front)', frame_laptop)
+        if state == "WORKOUT":
+            res_f = detector_front.find_pose(f_laptop)
+            f_laptop = detector_front.draw_styled_landmarks(f_laptop, res_f)
+            if res_f.pose_landmarks:
+                reps, stage, la, ra = ohp_logic.process_front_view(res_f.pose_landmarks.landmark)
+                cur_reps, cur_stage, avg_angle = reps, stage, (la + ra) / 2
 
-        # --- WIDOK Z BOKU ---
-        if frame_ip is not None:
-            # Obrót
-            frame_ip = cv2.rotate(frame_ip, cv2.ROTATE_90_CLOCKWISE)
+            res_s = detector_side.find_pose(f_ip)
+            f_ip = detector_side.draw_styled_landmarks(f_ip, res_s)
+            if res_s.pose_landmarks:
+                ohp_logic.check_side_errors(res_s.pose_landmarks.landmark)
 
-            h, w = frame_ip.shape[:2]
-            new_h = 600
-            scale = new_h / h
-            frame_ip_resized = cv2.resize(frame_ip, (int(w * scale), new_h))
+        combined = ui.combine_and_scale(f_laptop, f_ip, target_width=1920)
+        key = cv2.waitKey(1) & 0xFF
 
-            results_side = detector_side.find_pose(frame_ip_resized)
-            frame_ip_resized = detector_side.draw_styled_landmarks(frame_ip_resized, results_side)
+        # Obsługa myszy przez obiekt UI
+        if hasattr(ui, 'm_event') and ui.m_event[0] == cv2.EVENT_LBUTTONDOWN:
+            ex, ey = ui.m_event[1], ui.m_event[2]
+            if state == "MENU":
+                if ui.btn_start_rect[0] < ex < ui.btn_start_rect[2] and ui.btn_start_rect[1] < ey < ui.btn_start_rect[
+                    3]:
+                    state = "COUNTDOWN";
+                    countdown_start = time.time()
+            if ui.btn_quit_rect[0] < ex < ui.btn_quit_rect[2] and ui.btn_quit_rect[1] < ey < ui.btn_quit_rect[3]:
+                break
+            del ui.m_event
 
-            if results_side.pose_landmarks:
-                landmarks = results_side.pose_landmarks.landmark
-                is_error = ohp_logic.check_side_errors(landmarks)
+        if state == "MENU":
+            combined = ui.draw_advanced_menu(combined)
+            if key == ord(' '): state = "COUNTDOWN"; countdown_start = time.time()
+        elif state == "COUNTDOWN":
+            rem = int(10 - (time.time() - countdown_start))
+            combined = ui.draw_countdown(combined, max(0, rem))
+            if rem <= 0: state = "WORKOUT"
+        elif state == "WORKOUT":
+            combined = ui.draw_workout_ui(combined, cur_reps, cur_stage,
+                                          getattr(ohp_logic, 'feedback_front', ""),
+                                          getattr(ohp_logic, 'feedback_side', ""),
+                                          avg_angle,
+                                          {"Plecy": getattr(ohp_logic, 'back_angle', 0),
+                                           "Kolana": getattr(ohp_logic, 'knee_angle', 0)})
 
-                # Rysowanie linii pomocniczej (Idealny tor sztangi)
-                # Pobieramy X barku i rysujemy pionową linię
-                shoulder_x = int(landmarks[12].x * frame_ip_resized.shape[1])
-                cv2.line(frame_ip_resized, (shoulder_x, 0), (shoulder_x, new_h), (255, 255, 0), 1)
-
-                # Wyświetlanie kąta nóg (Debug)
-                cv2.putText(frame_ip_resized, f"Nogi: {ohp_logic.knee_angle}", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-                if is_error:
-                    cv2.putText(frame_ip_resized, ohp_logic.feedback_side, (10, 300),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
-
-            cv2.imshow('Kamera IP (Boczna)', frame_ip_resized)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        cv2.imshow(win_name, combined)
+        if key == 27 or key == ord('q'): break
 
     cam_handler.release()
     cv2.destroyAllWindows()
