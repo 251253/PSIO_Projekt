@@ -1,8 +1,7 @@
 import cv2
 import time
+import math
 import numpy as np
-from collections import deque  # Do przechowywania historii toru sztangi
-
 from camera_handler import CameraHandler
 from pose_analysis import PoseAnalyzer
 from exercise_logic import ExerciseLogic
@@ -11,194 +10,194 @@ from barbell_detector import BarbellDetector
 
 
 def main():
-    # --- KONFIGURACJA ---
     IP_WEBCAM_URL = None
     MODEL_PATH = "../models/barbell.pt"
 
-    # 1. Inicjalizacja Obiektów
+    print("[INIT] Startowanie systemu...")
+    cam_handler = CameraHandler(ip_url=IP_WEBCAM_URL)
+
+    detector_front = PoseAnalyzer()
+    detector_side = PoseAnalyzer()
+    ohp_logic = ExerciseLogic()
+    ui = UIDisplay()
+
+    barbell_detector = None
     try:
-        cam_handler = CameraHandler(ip_url=IP_WEBCAM_URL)
-        detector_front = PoseAnalyzer()
-        detector_side = PoseAnalyzer()
-        ohp_logic = ExerciseLogic()
-        ui = UIDisplay()
-
-        # Inicjalizacja YOLO (z obsługą błędu)
-        try:
-            barbell_detector = BarbellDetector(MODEL_PATH)
-            print("[INFO] Model YOLO załadowany pomyślnie.")
-        except Exception as e:
-            print(f"[OSTRZEŻENIE] Nie udało się załadować YOLO: {e}")
-            barbell_detector = None
-
+        barbell_detector = BarbellDetector(MODEL_PATH)
     except Exception as e:
-        print(f"Błąd krytyczny inicjalizacji: {e}")
-        return
+        print(f"[WARNING] YOLO nie działa: {e}")
 
-    # Zmienne stanu
-    state = "MENU"  # MENU, COUNTDOWN, WORKOUT
+    state = "MENU"
     countdown_start = 0
+    cur_reps, cur_stage, avg_angle = 0, "START", 90
+    SCALE_FACTOR = 0.5
 
-    # Zmienne treningowe
-    cur_reps = 0
-    cur_stage = "START"
-    avg_angle = 90
+    # --- ZMIENNE DO PŁYNNOŚCI (TRACKING) ---
+    missed_frames = 0
+    MAX_MISSED_FRAMES = 15  # Jak długo "udawać" sztangę (ok. 0.5 sek)
 
-    # Historia toru sztangi (ostatnie 40 klatek)
-    bar_path = deque(maxlen=40)
-
-    # Ustawienia Okna
     win_name = "CyberTrener OHP"
     cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-
-    # Obsługa myszy (przekazywanie do UI)
     cv2.setMouseCallback(win_name, lambda e, x, y, f, p: setattr(ui, 'm_event', (e, x, y)))
 
-    print("System gotowy. Start pętli głównej.")
-
     while True:
-        # 1. Pobranie klatek
         frames = cam_handler.get_frames()
         f_laptop = frames.get('laptop')
         f_ip = frames.get('ip_cam')
 
-        # Zabezpieczenie przed brakiem obrazu (czarne tło jeśli brak kamery)
-        if f_laptop is None:
-            f_laptop = np.zeros((720, 1280, 3), dtype=np.uint8)
-        else:
-            f_laptop = cv2.resize(f_laptop, (1280, 720))
+        if f_laptop is None and f_ip is None:
+            if cv2.waitKey(1) & 0xFF == ord('q'): break
+            continue
 
-        if f_ip is None:
-            f_ip = np.zeros((720, 405, 3), dtype=np.uint8)  # Wertykalny format
-        else:
-            # Obrót i formatowanie kamery bocznej
-            f_ip = cv2.rotate(f_ip, cv2.ROTATE_90_CLOCKWISE)
-            f_ip = cv2.resize(f_ip, (405, 720))  # Dopasowanie wysokości do laptopa
+        f_laptop = f_laptop if f_laptop is not None else np.zeros((480, 640, 3), dtype=np.uint8)
+        f_laptop = cv2.resize(f_laptop, (1280, 720))
 
-        # --- PRZETWARZANIE LOGIKI (AI) ---
+        f_ip = cv2.rotate(f_ip, cv2.ROTATE_90_CLOCKWISE) if f_ip is not None else np.zeros((640, 480, 3),
+                                                                                           dtype=np.uint8)
+        f_ip = cv2.resize(f_ip, (405, 720))
 
-        # A. Widok z przodu (Laptop) - MediaPipe
-        results_front = detector_front.find_pose(f_laptop)
-        f_laptop = detector_front.draw_styled_landmarks(f_laptop, results_front)
+        if state == "WORKOUT":
+            f_small_laptop = cv2.resize(f_laptop, (0, 0), fx=SCALE_FACTOR, fy=SCALE_FACTOR)
+            f_small_ip = cv2.resize(f_ip, (0, 0), fx=SCALE_FACTOR, fy=SCALE_FACTOR)
 
-        if results_front.pose_landmarks:
-            landmarks = results_front.pose_landmarks.landmark
-            # Aktualizacja logiki tylko w trakcie treningu, ale detekcja zawsze
-            if state == "WORKOUT":
-                cur_reps, cur_stage, ang_l, ang_r = ohp_logic.process_front_view(landmarks)
-                avg_angle = int((ang_l + ang_r) / 2)
-            else:
-                # Tylko odczyt kątów dla menu
-                l_shoulder = [landmarks[11].x, landmarks[11].y]
-                l_elbow = [landmarks[13].x, landmarks[13].y]
-                l_wrist = [landmarks[15].x, landmarks[15].y]
-                avg_angle = int(ohp_logic.calculate_angle(l_shoulder, l_elbow, l_wrist))
+            # A. YOLO (W TLE)
+            yolo_center = None
+            yolo_box = None
 
-        # B. Widok z boku (Telefon) - YOLO + MediaPipe
-        # 1. Detekcja Sztangi (YOLO)
-        if barbell_detector:
-            center, box = barbell_detector.detect(f_ip)
+            if barbell_detector:
+                barbell_detector.update_frame(f_small_laptop)
 
-            if center:
-                bar_path.append(center)
-                # Rysowanie ramki sztangi
-                x1, y1, x2, y2 = box
-                cv2.rectangle(f_ip, (x1, y1), (x2, y2), (255, 0, 255), 2)
-            else:
-                # Przerwa w linii jeśli zgubiono sztangę
-                if len(bar_path) > 0 and bar_path[-1] is not None:
-                    bar_path.append(None)
+                yolo_center_small, yolo_box_small = barbell_detector.get_result()
 
-            # 2. Rysowanie Toru Ruchu (Bar Path)
-            for i in range(1, len(bar_path)):
-                if bar_path[i - 1] is None or bar_path[i] is None:
-                    continue
-                # Efekt zanikania linii
-                thickness = int(np.sqrt(64 / float(len(bar_path) - i + 1)) * 2)
-                cv2.line(f_ip, bar_path[i - 1], bar_path[i], (0, 255, 255), thickness)
+                if yolo_center_small:
+                    yolo_center = (int(yolo_center_small[0] / SCALE_FACTOR), int(yolo_center_small[1] / SCALE_FACTOR))
+                    bx1, by1, bx2, by2 = yolo_box_small
+                    yolo_box = (
+                    int(bx1 / SCALE_FACTOR), int(by1 / SCALE_FACTOR), int(bx2 / SCALE_FACTOR), int(by2 / SCALE_FACTOR))
 
-        # 3. Detekcja Ciała z boku (MediaPipe)
-        results_side = detector_side.find_pose(f_ip)
-        f_ip = detector_side.draw_styled_landmarks(f_ip, results_side)
+            # B. MEDIAPIPE FRONT
+            res_f = detector_front.find_pose(f_small_laptop)
+            f_laptop = detector_front.draw_styled_landmarks(f_laptop, res_f)
 
-        if results_side.pose_landmarks and state == "WORKOUT":
-            ohp_logic.check_side_errors(results_side.pose_landmarks.landmark)
+            # C. MEDIAPIPE SIDE
+            res_s = detector_side.find_pose(f_small_ip)
+            f_ip = detector_side.draw_styled_landmarks(f_ip, res_s)
 
-        # --- BUDOWANIE INTERFEJSU (UI) ---
+            # --- SYSTEM HYBRYDOWEGO ŚLEDZENIA ---
+            valid_bar_center = None
+            tracking_mode = False  # Czy używamy trybu awaryjnego (pomarańczowy)
 
-        # Łączenie obrazów (Laptop po lewej, Telefon po prawej)
-        # Upewniamy się, że mają tę samą wysokość (720)
-        combined = np.hstack((f_laptop, f_ip))
+            if res_f.pose_landmarks:
+                landmarks = res_f.pose_landmarks.landmark
+                h, w, c = f_laptop.shape
 
-        # Obsługa Stanów Aplikacji
+                # Obliczamy środek dłoni (Baza dla trybu awaryjnego)
+                wrist_l = landmarks[15]
+                wrist_r = landmarks[16]
+                wl_x, wl_y = wrist_l.x * w, wrist_l.y * h
+                wr_x, wr_y = wrist_r.x * w, wrist_r.y * h
+                hands_center = (int((wl_x + wr_x) / 2), int((wl_y + wr_y) / 2))
+
+                # SCENARIUSZ 1: YOLO widzi sztangę
+                if yolo_center:
+                    # Sprawdzamy czy to nie półka (Filtr odległości)
+                    dist_to_hands = math.hypot(hands_center[0] - yolo_center[0], hands_center[1] - yolo_center[1])
+                    LIMIT_DISTANCE = w * 0.20
+
+                    if dist_to_hands < LIMIT_DISTANCE:
+                        valid_bar_center = yolo_center
+                        missed_frames = 0  # Reset licznika błędów
+                        tracking_mode = False
+
+                # SCENARIUSZ 2: YOLO zgubiło sztangę (szybki ruch)
+                else:
+                    if missed_frames < MAX_MISSED_FRAMES:
+                        # Używamy środka dłoni jako pozycji sztangi
+                        valid_bar_center = hands_center
+                        missed_frames += 1
+                        tracking_mode = True  # Tryb awaryjny
+
+            # Jeśli nie ma człowieka, to reset
+            elif yolo_center:
+                valid_bar_center = None
+
+                # D. RYSOWANIE I LOGIKA
+            if valid_bar_center:
+                # Wybór koloru: Żółty (YOLO) lub Pomarańczowy (Tracking dłoni)
+                box_color = (0, 255, 255) if not tracking_mode else (0, 165, 255)
+
+                # Rysowanie kropki środka
+                cv2.circle(f_laptop, valid_bar_center, 8, box_color, -1)
+
+                # Jeśli mamy ramkę z YOLO, to ją rysujemy, jeśli tracking - rysujemy kółko wokół dłoni
+                if yolo_box and not tracking_mode:
+                    x1, y1, x2, y2 = yolo_box
+                    cv2.rectangle(f_laptop, (x1, y1), (x2, y2), box_color, 2)
+                elif tracking_mode:
+                    # W trybie awaryjnym rysujemy mniejsze kółko sygnalizujące estymację
+                    cv2.circle(f_laptop, valid_bar_center, 20, box_color, 2)
+
+                # Logika "Środek" (Linia do nosa)
+                if res_f.pose_landmarks:
+                    nose = res_f.pose_landmarks.landmark[0]
+                    nose_x, nose_y = int(nose.x * w), int(nose.y * h)
+
+                    line_color = (0, 255, 0)
+                    # Tolerancja błędów
+                    if abs(nose_x - valid_bar_center[0]) > (w * 0.08):
+                        line_color = (0, 0, 255)
+                    cv2.line(f_laptop, (nose_x, nose_y), valid_bar_center, line_color, 2)
+
+            # Logika biznesowa (Liczenie powtórzeń)
+            if res_f.pose_landmarks:
+                bar_x = valid_bar_center[0] if valid_bar_center else None
+
+                reps, stage, la, ra = ohp_logic.process_front_view(
+                    res_f.pose_landmarks.landmark,
+                    bar_center_x=bar_x,
+                    frame_width=f_laptop.shape[1]
+                )
+                cur_reps, cur_stage, avg_angle = reps, stage, (la + ra) / 2
+
+            if res_s.pose_landmarks:
+                ohp_logic.check_side_errors(res_s.pose_landmarks.landmark)
+
+        # UI
+        combined = ui.combine_and_scale(f_laptop, f_ip, target_width=1920)
         key = cv2.waitKey(1) & 0xFF
 
-        # Logika przycisków myszy
-        if hasattr(ui, 'm_event'):
-            me, ex, ey = ui.m_event
-            if me == cv2.EVENT_LBUTTONDOWN:
-                if state == "MENU":
-                    # Przycisk START
-                    if ui.btn_start_rect[0] < ex < ui.btn_start_rect[2] and ui.btn_start_rect[1] < ey < \
-                            ui.btn_start_rect[3]:
-                        state = "COUNTDOWN"
-                        countdown_start = time.time()
-                        # Reset zmiennych treningowych przy starcie
-                        ohp_logic.reps = 0
-                        bar_path.clear()
-
-                    # Przycisk QUIT
-                    if ui.btn_quit_rect[0] < ex < ui.btn_quit_rect[2] and ui.btn_quit_rect[1] < ey < ui.btn_quit_rect[
-                        3]:
-                        break
-            # Czyścimy zdarzenie po obsłużeniu
+        if hasattr(ui, 'm_event') and ui.m_event[0] == cv2.EVENT_LBUTTONDOWN:
+            ex, ey = ui.m_event[1], ui.m_event[2]
+            if state == "MENU":
+                if ui.btn_start_rect[0] < ex < ui.btn_start_rect[2] and ui.btn_start_rect[1] < ey < ui.btn_start_rect[
+                    3]:
+                    state = "COUNTDOWN";
+                    countdown_start = time.time()
+            if ui.btn_quit_rect[0] < ex < ui.btn_quit_rect[2] and ui.btn_quit_rect[1] < ey < ui.btn_quit_rect[3]:
+                break
             del ui.m_event
 
-        # Rysowanie w zależności od stanu
         if state == "MENU":
             combined = ui.draw_advanced_menu(combined)
-            if key == ord(' '):
-                state = "COUNTDOWN"
-                countdown_start = time.time()
-                ohp_logic.reps = 0
-                bar_path.clear()
-
+            if key == ord(' '): state = "COUNTDOWN"; countdown_start = time.time()
         elif state == "COUNTDOWN":
             rem = int(10 - (time.time() - countdown_start))
             combined = ui.draw_countdown(combined, max(0, rem))
-            if rem <= 0:
-                state = "WORKOUT"
-
+            if rem <= 0: state = "WORKOUT"
         elif state == "WORKOUT":
-            # Pobieramy błędy z logiki
-            err_front = getattr(ohp_logic, 'feedback_front', "")
-            err_side = getattr(ohp_logic, 'feedback_side', "")
+            combined = ui.draw_workout_ui(combined, cur_reps, cur_stage,
+                                          getattr(ohp_logic, 'feedback_front', ""),
+                                          getattr(ohp_logic, 'feedback_side', ""),
+                                          avg_angle,
+                                          {"Plecy": getattr(ohp_logic, 'back_angle', 0),
+                                           "Kolana": getattr(ohp_logic, 'knee_angle', 0)})
 
-            # Debug values (bezpieczne pobieranie)
-            back_angle = getattr(ohp_logic, 'back_angle', 0)
-            knee_angle = getattr(ohp_logic, 'knee_angle', 0)
-
-            combined = ui.draw_workout_ui(
-                combined,
-                cur_reps,
-                cur_stage,
-                err_front,
-                err_side,
-                avg_angle,
-                {"Plecy": back_angle, "Kolana": knee_angle}  # Słownik debugowania
-            )
-
-            # Wyjście do menu po wciśnięciu 'm'
-            if key == ord('m'):
-                state = "MENU"
-
-        # Wyświetlanie
         cv2.imshow(win_name, combined)
+        if key == 27 or key == ord('q'): break
 
-        if key == ord('q'):
-            break
-
+    if barbell_detector:
+        barbell_detector.stop()
     cam_handler.release()
     cv2.destroyAllWindows()
 
