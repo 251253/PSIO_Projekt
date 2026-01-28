@@ -32,58 +32,49 @@ class ExerciseLogic:
 
     def check_side_errors(self, landmarks):
         """
-        Analiza widoku bocznego (Kamera Telefonu).
-        Sprawdza: Plecy, Nogi (Push Press) i Tor Sztangi.
+        Analiza widoku bocznego (Kamera Telefonu) - Tylko MediaPipe.
         """
-        self.feedback_side = ""  # Reset
-        is_error = False
+        self.feedback_side = ""
 
-        # Pobranie punktów (Prawa strona ciała)
-        # 12-Bark, 14-Łokieć, 16-Nadgarstek, 24-Biodro, 26-Kolano, 28-Kostka
+        # 12-Bark, 24-Biodro, 26-Kolano, 28-Kostka
         shoulder = [landmarks[12].x, landmarks[12].y]
         wrist = [landmarks[16].x, landmarks[16].y]
         hip = [landmarks[24].x, landmarks[24].y]
         knee = [landmarks[26].x, landmarks[26].y]
         ankle = [landmarks[28].x, landmarks[28].y]
 
-        # 1. KĄT PLECÓW (Bark-Biodro-Kolano)
+        # 1. KĄT PLECÓW
         self.back_angle = int(self.calculate_angle(shoulder, hip, knee))
 
-        # 2. KĄT KOLANA (Biodro-Kolano-Kostka) - Detekcja Push Press
+        # 2. KĄT KOLANA
         self.knee_angle = int(self.calculate_angle(hip, knee, ankle))
 
-        # --- LOGIKA BŁĘDÓW (Priorytety) ---
-
-        # PRIORYTET 1: NOGI (Oszukiwanie)
-        # Jeśli kąt kolana spada poniżej 165, to znaczy, że uginasz nogi
-        if self.knee_angle < 165:
+        # --- LOGIKA BŁĘDÓW ---
+        if self.knee_angle < 155:
             self.feedback_side = "NIE UGINAJ NOG!"
             return True
 
-        # PRIORYTET 2: PLECY (Niebezpieczeństwo)
-        # Artykuł: Unikaj wypychania bioder i przeprostu lędźwiowego
-        if self.back_angle < 165:
+        if self.back_angle < 160:
             self.feedback_side = "PROSTE PLECY!"
             return True
 
-        # PRIORYTET 3: TOR SZTANGI (Bar Path)
-        # Artykuł: Sztanga ma iść pionowo blisko ciała.
-        # Sprawdzamy odległość poziomą (oś X) między barkiem a nadgarstkiem.
-        # Jeśli jest duża, znaczy że sztanga "ucieka" do przodu.
+        # Sprawdzenie czy sztanga nie jest za daleko (bazując na nadgarstkach)
         horizontal_distance = abs(shoulder[0] - wrist[0])
-
-        # Próg 0.15 to około 15% szerokości ekranu. Dostosować w razie potrzeby.
-        if horizontal_distance > 0.15 and wrist[1] < shoulder[1]:  # Tylko gdy sztanga jest nad barkami
+        if horizontal_distance > 0.15 and wrist[1] < shoulder[1]:
             self.feedback_side = "SZTANGA BLIZEJ!"
             return True
 
         return False
 
-    def process_front_view(self, landmarks):
+    def process_front_view(self, landmarks, bar_center_x=None, frame_width=1280):
         """
         Analiza widoku przedniego (Kamera Laptopa).
+        Teraz przyjmuje też pozycję sztangi (bar_center_x) z YOLO!
         """
         self.feedback_front = ""
+
+        # Pobieramy punkty
+        nose = [landmarks[0].x, landmarks[0].y]  # Nos jest pod indeksem 0
 
         l_shoulder = [landmarks[11].x, landmarks[11].y]
         l_elbow = [landmarks[13].x, landmarks[13].y]
@@ -99,21 +90,29 @@ class ExerciseLogic:
         self.right_arm_angle = int(angle_r)
         avg_angle = (angle_l + angle_r) / 2
 
-        # BŁĄD: Asymetria
+        # --- NOWOŚĆ: SPRAWDZANIE ŚRODKA CIĘŻKOŚCI (YOLO vs NOS) ---
+        if bar_center_x is not None:
+            # Przeliczamy pozycję nosa na piksele
+            nose_pixel_x = nose[0] * frame_width
+
+            # Obliczamy różnicę
+            diff = abs(nose_pixel_x - bar_center_x)
+
+            # Jeśli różnica większa niż 8% szerokości ekranu -> BŁĄD
+            if diff > (frame_width * 0.08):
+                self.feedback_front = "SRODEK!"
+
+        # Standardowe błędy MediaPipe (nadal działają)
         wrist_diff = abs(l_wrist[1] - r_wrist[1])
-        if wrist_diff > 0.08:
+        if wrist_diff > 0.08 and self.feedback_front == "":
             self.feedback_front = "ROWNO RECE!"
 
-        # BŁĄD: Łokcie pod sztangą
-        # Jeśli łokieć jest poziomo (X) znacznie dalej niż nadgarstek
         elbow_flare_l = abs(l_elbow[0] - l_shoulder[0])
         wrist_width_l = abs(l_wrist[0] - l_shoulder[0])
-
-        # Jeśli łokieć jest szerzej niż nadgarstek o duży margines
-        if (elbow_flare_l > wrist_width_l + 0.05) and avg_angle < 120:
+        if (elbow_flare_l > wrist_width_l + 0.05) and avg_angle < 120 and self.feedback_front == "":
             self.feedback_front = "LOKCIE DO SRODKA!"
 
-        # Liczenie
+        # Liczenie powtórzeń
         if avg_angle > 160:
             self.current_stage = "UP"
         if avg_angle < 90 and self.current_stage == "UP":

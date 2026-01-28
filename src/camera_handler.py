@@ -3,37 +3,41 @@ import threading
 import time
 
 
-class ThreadedIPCamera:
-    """
-    Pomocnicza klasa do obsługi kamery IP w oddzielnym wątku.
-    Zapobiega buforowaniu klatek i redukuje opóźnienia (lag).
-    """
-
-    def __init__(self, src):
-        self.capture = cv2.VideoCapture(src)
+class ThreadedCamera:
+    def __init__(self, source):
+        self.capture = cv2.VideoCapture(source)
+        # Optymalizacja bufora
         self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        self.status, self.frame = self.capture.read()
+        self.frame = None
+        self.status = False
         self.stopped = False
 
-        # Uruchomienie wątku czytającego
-        self.thread = threading.Thread(target=self.update, args=(), daemon=True)
+        # Czytamy pierwszą klatkę, żeby upewnić się, że działa
+        self.status, self.frame = self.capture.read()
+
+        # Uruchamiamy wątek
+        self.thread = threading.Thread(target=self.update, args=())
+        self.thread.daemon = True  # Wątek zginie razem z programem
         self.thread.start()
 
     def update(self):
-        """Pętla działająca w tle - czyta klatki tak szybko jak się da"""
+        """Pętla działająca w tle, pobierająca ciągle najnowszą klatkę."""
         while not self.stopped:
             if self.capture.isOpened():
                 status, frame = self.capture.read()
                 if status:
                     self.frame = frame
                     self.status = status
+                else:
+                    # Jeśli zgubiliśmy połączenie, czekamy chwilę
+                    time.sleep(0.1)
             else:
                 time.sleep(0.1)
 
-    def read(self):
-        """Zwraca zawsze najnowszą dostępną klatkę"""
-        return self.status, self.frame
+    def get_frame(self):
+        """Zwraca ostatnią pobraną klatkę natychmiastowo."""
+        return self.frame
 
     def stop(self):
         self.stopped = True
@@ -42,42 +46,27 @@ class ThreadedIPCamera:
 
 
 class CameraHandler:
-    def __init__(self, ip_url=None, laptop_source=0):
-        self.ip_url = ip_url
+    def __init__(self, ip_url=None):
+        # 0 = kamera laptopa
+        self.cam_laptop = ThreadedCamera(0)
 
-        # 1. Kamera Laptopa
-        self.cap_laptop = cv2.VideoCapture(laptop_source)
-
-        # 2. Kamera IP (z użyciem wątków)
-        self.cam_ip_threaded = None
-        if self.ip_url:
-            try:
-                self.cam_ip_threaded = ThreadedIPCamera(self.ip_url)
-            except Exception as e:
-                print(f"Błąd połączenia z kamerą IP: {e}")
+        self.cam_ip = None
+        if ip_url:
+            self.cam_ip = ThreadedCamera(ip_url)
 
     def get_frames(self):
-        frames = {}
+        """Zwraca słownik z najnowszymi klatkami z wątków."""
+        frames = {
+            'laptop': self.cam_laptop.get_frame(),
+            'ip_cam': None
+        }
 
-        # Odczyt z laptopa
-        if self.cap_laptop.isOpened():
-            ret_laptop, frame_laptop = self.cap_laptop.read()
-            frames['laptop'] = frame_laptop if ret_laptop else None
-        else:
-            frames['laptop'] = None
-
-        # Odczyt z IP Webcam (przez wątek)
-        if self.cam_ip_threaded:
-            ret_ip, frame_ip = self.cam_ip_threaded.read()
-            frames['ip_cam'] = frame_ip if ret_ip else None
-        else:
-            frames['ip_cam'] = None
+        if self.cam_ip:
+            frames['ip_cam'] = self.cam_ip.get_frame()
 
         return frames
 
     def release(self):
-        if self.cap_laptop.isOpened():
-            self.cap_laptop.release()
-
-        if self.cam_ip_threaded:
-            self.cam_ip_threaded.stop()
+        self.cam_laptop.stop()
+        if self.cam_ip:
+            self.cam_ip.stop()
